@@ -1,85 +1,89 @@
 #!/bin/bash
+set -e
 
-REQUIRED_PYTHON="3.10"
+# uv 기반 환경 구성. Python 3.10 + torch 2.3.0 (cu121) + vllm 0.5.0.
+# uv가 없으면 자동 설치하고, .venv를 프로젝트 디렉토리 안에 생성합니다.
 
-version_ge() {
-    [ "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1" ]
+PYTHON_VERSION="3.10"
+VENV_DIR=".venv"
+
+# ── uv 확인/설치 ─────────────────────────────────────────────
+ensure_uv() {
+    if ! command -v uv &> /dev/null; then
+        echo "[INFO] uv가 없어서 설치합니다 ..."
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+    echo "[OK] uv $(uv --version | awk '{print $2}')"
 }
 
-check_python() {
-    if ! command -v python3 &> /dev/null; then
-        echo "Python3 not be found."
-        return 1
-    fi
-
-    # Get the current Python version as a string
-    PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
-
-    # Check if the current Python version is greater than or equal to the required version
-    if ! version_ge "$PYTHON_VERSION" "$REQUIRED_PYTHON"; then
-        echo "This script requires Python $REQUIRED_PYTHON or higher but found $PYTHON_VERSION"
-        return 1
-    fi
-
-    return 0
-}
-
+# ── HuggingFace 토큰 ──────────────────────────────────────────
 setup_hf() {
-    echo "Please enter your Hugging Face token (press Enter to skip):"
+    echo ""
+    echo "HuggingFace 토큰을 입력하세요 (건너뛰려면 Enter):"
     read -r token
     if [ -n "$token" ]; then
-        echo "Storing HF_TOKEN in .env file..."
         echo "HF_TOKEN=$token" >> .env
-        
-        echo "Installing Hugging Face CLI..."
-        yes | pip install --upgrade huggingface_hub
-        echo "Logging in to Hugging Face CLI..."
-        huggingface-cli login --token $token
+        "$VENV_DIR/bin/huggingface-cli" login --token "$token"
     else
-        echo "No token entered. Skipping..."
+        echo "[SKIP] HuggingFace 토큰 없음"
     fi
 }
 
-setup_together() {
-    echo "Please enter your Together AI token (press Enter to skip):"
-    read -r token
-    if [ -n "$token" ]; then
-        echo "Storing TOGETHER_API_KEY in .env file..."
-        echo "TOGETHER_API_KEY=$token" >> .env
-    else
-        echo "No token entered. Skipping..."
-    fi
-}
-
+# ── .venv 생성 (Python 3.10) ─────────────────────────────────
 setup_venv() {
-    echo "Setting up venv..."
-
-    python -m venv venv
-    source venv/bin/activate
-
-    echo "Done setting up venv!"
+    if [ -d "$VENV_DIR" ]; then
+        echo "[SKIP] $VENV_DIR 이미 존재합니다."
+    else
+        echo "Creating $VENV_DIR (Python $PYTHON_VERSION) ..."
+        uv venv --python "$PYTHON_VERSION" "$VENV_DIR"
+        echo "[OK] $VENV_DIR 생성 완료"
+    fi
 }
 
+# ── torch (CUDA 12.1) ─────────────────────────────────────────
+install_torch() {
+    echo "Installing torch==2.3.0 (cu121) ..."
+    uv pip install --python "$VENV_DIR/bin/python" \
+        torch==2.3.0 \
+        --index-url https://download.pytorch.org/whl/cu121
+    echo "[OK] torch 설치 완료"
+}
+
+# ── vllm (jailbreak 평가용, xformers 등 자동 의존) ────────────
+install_vllm() {
+    echo "Installing vllm==0.5.0 ..."
+    uv pip install --python "$VENV_DIR/bin/python" vllm==0.5.0
+    echo "[OK] vllm 설치 완료"
+}
+
+# ── 나머지 requirements ────────────────────────────────────────
 install_requirements() {
-    echo "Installing requirements..."
-
-    yes | pip install -r requirements.txt --upgrade
-
-    echo "Done installing requirements!"
+    echo "Installing requirements.txt ..."
+    uv pip install --python "$VENV_DIR/bin/python" -r requirements.txt
+    # triton이 런타임에 setuptools/wheel을 import 하므로 항상 보장
+    uv pip install --python "$VENV_DIR/bin/python" setuptools wheel
+    echo "[OK] requirements.txt 설치 완료"
 }
 
-echo "Running set up..."
+# ── 메인 ─────────────────────────────────────────────────────
+echo "========================================="
+echo " refusal_direction 환경 설정 (uv)"
+echo "========================================="
 
-echo "" > .env
+> .env  # .env 초기화
 
-check_python
-if [ $? -ne 0 ]; then
-    return 1
-fi
-
-setup_hf
-setup_together
+ensure_uv
 setup_venv
+install_torch
+install_vllm
 install_requirements
+setup_hf
 
-echo "All set up!"
+echo ""
+echo "========================================="
+echo " 설치 완료!"
+echo " 실행 방법:"
+echo "   source $VENV_DIR/bin/activate"
+echo "   python -m pipeline.run_pipeline --model_path <HF_MODEL_ID>"
+echo "========================================="
